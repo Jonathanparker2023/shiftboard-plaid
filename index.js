@@ -6,8 +6,10 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+const env = process.env.PLAID_ENV === 'production' ? PlaidEnvironments.production : PlaidEnvironments.sandbox;
+
 const config = new Configuration({
-  basePath: PlaidEnvironments.sandbox,
+  basePath: env,
   baseOptions: {
     headers: {
       'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID || '69caec649a4613000d81fe4c',
@@ -18,10 +20,8 @@ const config = new Configuration({
 
 const plaidClient = new PlaidApi(config);
 
-// Store access tokens in memory (fine for personal use)
 let accessToken = null;
 
-// Step 1: Create a link token (frontend uses this to open Plaid Link)
 app.post('/api/create-link-token', async (req, res) => {
   try {
     const response = await plaidClient.linkTokenCreate({
@@ -38,7 +38,6 @@ app.post('/api/create-link-token', async (req, res) => {
   }
 });
 
-// Step 2: Exchange public token for access token
 app.post('/api/exchange-token', async (req, res) => {
   try {
     const { public_token } = req.body;
@@ -51,7 +50,6 @@ app.post('/api/exchange-token', async (req, res) => {
   }
 });
 
-// Step 3: Get transactions for the current week
 app.get('/api/transactions', async (req, res) => {
   if (!accessToken) {
     return res.status(400).json({ error: 'No account connected. Please link your bank first.' });
@@ -66,25 +64,17 @@ app.get('/api/transactions', async (req, res) => {
       options: { count: 100, offset: 0 },
     });
 
-    // Map transactions to days
-    const dayMap = {
-      '2026-03-29': 'Sun', '2026-03-30': 'Mon', '2026-03-31': 'Tue',
-      '2026-04-01': 'Wed', '2026-04-02': 'Thu', '2026-04-03': 'Fri', '2026-04-04': 'Sat'
+    const spending = {
+      '2026-03-29': 0, '2026-03-30': 0, '2026-03-31': 0,
+      '2026-04-01': 0, '2026-04-02': 0, '2026-04-03': 0, '2026-04-04': 0
     };
 
-    // Group spending by day (only positive amounts = spending, exclude income deposits)
-    const spending = {};
-    Object.keys(dayMap).forEach(d => { spending[d] = 0; });
-
     response.data.transactions.forEach(function(tx) {
-      // Positive amount in Plaid = money out (spending)
-      // Negative amount = money in (income/deposit) - skip these
       if (tx.amount > 0 && spending[tx.date] !== undefined) {
         spending[tx.date] += tx.amount;
       }
     });
 
-    // Round each day
     Object.keys(spending).forEach(d => {
       spending[d] = Math.round(spending[d]);
     });
@@ -104,8 +94,7 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/', (req, res) => res.json({ status: 'Shiftboard Plaid backend running' }));
+app.get('/', (req, res) => res.json({ status: 'Shiftboard Plaid backend running', env: process.env.PLAID_ENV || 'sandbox' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server running on port ' + PORT));
+app.listen(PORT, () => console.log('Server running on port ' + PORT + ' env=' + (process.env.PLAID_ENV || 'sandbox')));
