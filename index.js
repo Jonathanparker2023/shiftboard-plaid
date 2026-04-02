@@ -42,7 +42,7 @@ app.post('/api/exchange-token', async (req, res) => {
     const { public_token } = req.body;
     const response = await plaidClient.itemPublicTokenExchange({ public_token });
     accessToken = response.data.access_token;
-    res.json({ success: true });
+    res.json({ success: true, access_token: accessToken });
   } catch (err) {
     console.error(err.response ? err.response.data : err.message);
     res.status(500).json({ error: err.message });
@@ -50,20 +50,21 @@ app.post('/api/exchange-token', async (req, res) => {
 });
 
 app.get('/api/transactions', async (req, res) => {
-  if (!accessToken) {
+  const token = req.query.token || accessToken;
+  if (!token) {
     return res.status(400).json({ error: 'No account connected. Please link your bank first.' });
   }
+  accessToken = token;
   try {
     const startDate = req.query.start || '2026-03-29';
     const endDate = req.query.end || '2026-04-04';
 
-    // Use transactionsGet with retry for production
     let attempts = 0;
     let txData = null;
     while(attempts < 3) {
       try {
         const response = await plaidClient.transactionsGet({
-          access_token: accessToken,
+          access_token: token,
           start_date: startDate,
           end_date: endDate,
           options: { count: 100, offset: 0 },
@@ -71,7 +72,6 @@ app.get('/api/transactions', async (req, res) => {
         txData = response.data;
         break;
       } catch(e) {
-        // PRODUCT_NOT_READY means Plaid is still syncing - wait and retry
         if(e.response && e.response.data && e.response.data.error_code === 'PRODUCT_NOT_READY') {
           attempts++;
           await new Promise(r => setTimeout(r, 3000));
