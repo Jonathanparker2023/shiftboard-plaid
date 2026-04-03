@@ -6,21 +6,89 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-const env = process.env.PLAID_ENV === 'production' ? PlaidEnvironments.production : PlaidEnvironments.sandbox;
+// Firebase REST API (no SDK needed — just HTTP writes)
+const FIREBASE_DB_URL = 'https://shiftly-300fa-default-rtdb.firebaseio.com';
+
+// Env vars set on Render dashboard
+const SYNC_KEY = process.env.SYNC_KEY || '';
+const PLAID_ACCESS_TOKEN_ENV = process.env.PLAID_ACCESS_TOKEN || '';
 
 const config = new Configuration({
-  basePath: env,
+  basePath: PlaidEnvironments[process.env.PLAID_ENV || 'production'],
   baseOptions: {
     headers: {
       'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID || '69caec649a4613000d81fe4c',
-      'PLAID-SECRET': process.env.PLAID_SECRET || 'f338376a6a1dc1090da919bfa18dc6',
+      'PLAID-SECRET': process.env.PLAID_SECRET || '2124a58d6d1a455cdf9a1c79c8abc0',
     },
   },
 });
 
 const plaidClient = new PlaidApi(config);
-let accessToken = null;
 
+// In-memory token (set from exchange or env var)
+let accessToken = PLAID_ACCESS_TOKEN_ENV || null;
+
+// ── Firebase REST helper ──
+async function writeToFirebase(path, data) {
+  const url = `${FIREBASE_DB_URL}/${path}.json`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Firebase write failed: ' + res.status);
+  return res.json();
+}
+
+// ── Fetch transactions from Plaid and cache to Firebase ──
+async function syncAndCache(token) {
+  // Calculate current week Sun-Sat
+  const now = new Date();
+  const dayOfWeek = now.getDay(); // 0=Sun
+  const sunday = new Date(now);
+  sunday.setDate(now.getDate() - dayOfWeek);
+  const saturday = new Date(sunday);
+  saturday.setDate(sunday.getDate() + 6);
+
+  const startDate = sunday.toISOString().slice(0, 10);
+  const endDate = saturday.toISOString().slice(0, 10);
+
+  const response = await plaidClient.transactionsGet({
+    access_token: token,
+    start_date: startDate,
+    end_date: endDate,
+    options: { count: 100, offset: 0 },
+  });
+
+  const transactions = response.data.transactions.map(tx => ({
+    date: tx.date,
+    name: tx.name,
+    amount: tx.amount,
+    category: tx.category,
+    merchant_name: tx.merchant_name || '',
+    datetime: tx.datetime || tx.authorized_datetime || '',
+  }));
+
+  // Write cached transactions to Firebase
+  await writeToFirebase('shiftboard/cached_transactions', {
+    transactions: transactions,
+    startDate: startDate,
+    endDate: endDate,
+    syncedAt: Date.now(),
+  });
+
+  // Write sync status
+  await writeToFirebase('shiftboard/sync_status', {
+    lastSync: Date.now(),
+    status: 'ok',
+    txCount: transactions.length,
+  });
+
+  console.log('Synced ' + transactions.length + ' transactions to Firebase (' + startDate + ' to ' + endDate + ')');
+  return transactions;
+}
+
+// ── Step 1: Create a link token (with webhook for auto-sync) ──
 app.post('/api/create-link-token', async (req, res) => {
   try {
     const response = await plaidClient.linkTokenCreate({
@@ -29,6 +97,7 @@ app.post('/api/create-link-token', async (req, res) => {
       products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: 'en',
+      webhook: 'https://shiftboard-plaid.onrender.com/api/webhook',
     });
     res.json({ link_token: response.data.link_token });
   } catch (err) {
@@ -37,6 +106,7 @@ app.post('/api/create-link-token', async (req, res) => {
   }
 });
 
+// ── Step 2: Exchange public token for access token ──
 app.post('/api/exchange-token', async (req, res) => {
   try {
     const { public_token } = req.body;
@@ -49,6 +119,7 @@ app.post('/api/exchange-token', async (req, res) => {
   }
 });
 
+// ── Step 3: Get transactions for the current week ──
 app.get('/api/transactions', async (req, res) => {
   const token = req.query.token || accessToken;
   if (!token) {
@@ -58,39 +129,22 @@ app.get('/api/transactions', async (req, res) => {
   try {
     const startDate = req.query.start || '2026-03-29';
     const endDate = req.query.end || '2026-04-04';
+    const response = await plaidClient.transactionsGet({
+      access_token: token,
+      start_date: startDate,
+      end_date: endDate,
+      options: { count: 100, offset: 0 },
+    });
 
-    let attempts = 0;
-    let txData = null;
-    while(attempts < 3) {
-      try {
-        const response = await plaidClient.transactionsGet({
-          access_token: token,
-          start_date: startDate,
-          end_date: endDate,
-          options: { count: 100, offset: 0 },
-        });
-        txData = response.data;
-        break;
-      } catch(e) {
-        if(e.response && e.response.data && e.response.data.error_code === 'PRODUCT_NOT_READY') {
-          attempts++;
-          await new Promise(r => setTimeout(r, 3000));
-        } else {
-          throw e;
-        }
-      }
-    }
-
-    if(!txData) {
-      return res.status(503).json({ error: 'Plaid is still syncing your account. Please try again in 30 seconds.' });
-    }
-
-    const spending = {
-      '2026-03-29': 0, '2026-03-30': 0, '2026-03-31': 0,
-      '2026-04-01': 0, '2026-04-02': 0, '2026-04-03': 0, '2026-04-04': 0
+    const dayMap = {
+      '2026-03-29': 'Sun', '2026-03-30': 'Mon', '2026-03-31': 'Tue',
+      '2026-04-01': 'Wed', '2026-04-02': 'Thu', '2026-04-03': 'Fri', '2026-04-04': 'Sat'
     };
 
-    txData.transactions.forEach(function(tx) {
+    const spending = {};
+    Object.keys(dayMap).forEach(d => { spending[d] = 0; });
+
+    response.data.transactions.forEach(function(tx) {
       if (tx.amount > 0 && spending[tx.date] !== undefined) {
         spending[tx.date] += tx.amount;
       }
@@ -102,7 +156,7 @@ app.get('/api/transactions', async (req, res) => {
 
     res.json({
       spending,
-      transactions: txData.transactions.map(tx => ({
+      transactions: response.data.transactions.map(tx => ({
         date: tx.date,
         name: tx.name,
         amount: tx.amount,
@@ -111,11 +165,73 @@ app.get('/api/transactions', async (req, res) => {
     });
   } catch (err) {
     console.error(err.response ? err.response.data : err.message);
-    res.status(500).json({ error: err.response ? JSON.stringify(err.response.data) : err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'Shiftboard Plaid backend running', env: process.env.PLAID_ENV || 'sandbox' }));
+// ── Plaid Webhook (receives automatic transaction alerts) ──
+app.post('/api/webhook', async (req, res) => {
+  const { webhook_type, webhook_code } = req.body;
+  console.log('Plaid webhook received:', webhook_type, webhook_code);
+
+  if (webhook_type === 'TRANSACTIONS') {
+    const token = accessToken || PLAID_ACCESS_TOKEN_ENV;
+    if (!token) {
+      console.error('Webhook: no access token available');
+      return res.json({ received: true, synced: false });
+    }
+    try {
+      // Small delay so Plaid finalizes the transactions
+      await new Promise(r => setTimeout(r, 3000));
+      await syncAndCache(token);
+      res.json({ received: true, synced: true });
+    } catch (err) {
+      console.error('Webhook sync error:', err.message);
+      res.json({ received: true, synced: false, error: err.message });
+    }
+  } else {
+    res.json({ received: true });
+  }
+});
+
+// ── Cron Sync (hit by cron-job.org every 6 hours) ──
+app.get('/api/sync', async (req, res) => {
+  if (!SYNC_KEY || req.query.key !== SYNC_KEY) {
+    return res.status(403).json({ error: 'Invalid sync key' });
+  }
+  const token = accessToken || PLAID_ACCESS_TOKEN_ENV;
+  if (!token) {
+    return res.status(400).json({ error: 'No access token configured. Set PLAID_ACCESS_TOKEN env var.' });
+  }
+  try {
+    const txs = await syncAndCache(token);
+    res.json({ success: true, transactions: txs.length });
+  } catch (err) {
+    console.error('Cron sync error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Register webhook for existing Plaid item ──
+app.post('/api/register-webhook', async (req, res) => {
+  const token = accessToken || PLAID_ACCESS_TOKEN_ENV;
+  if (!token) {
+    return res.status(400).json({ error: 'No access token' });
+  }
+  try {
+    await plaidClient.itemWebhookUpdate({
+      access_token: token,
+      webhook: 'https://shiftboard-plaid.onrender.com/api/webhook',
+    });
+    res.json({ success: true, message: 'Webhook registered' });
+  } catch (err) {
+    console.error(err.response ? err.response.data : err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Health check
+app.get('/', (req, res) => res.json({ status: 'Shiftboard Plaid backend running', hasToken: !!accessToken }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server running on port ' + PORT + ' env=' + (process.env.PLAID_ENV || 'sandbox')));
+app.listen(PORT, () => console.log('Server running on port ' + PORT));
