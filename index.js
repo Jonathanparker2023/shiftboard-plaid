@@ -97,7 +97,7 @@ app.post('/api/create-link-token', async (req, res) => {
       products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: 'en',
-      webhook: 'https://shiftboard-plaid.onrender.com/api/webhook',
+      webhook: 'https://shiftboard-plaid-1.onrender.com/api/webhook',
     });
     res.json({ link_token: response.data.link_token });
   } catch (err) {
@@ -221,7 +221,7 @@ app.post('/api/register-webhook', async (req, res) => {
   try {
     await plaidClient.itemWebhookUpdate({
       access_token: token,
-      webhook: 'https://shiftboard-plaid.onrender.com/api/webhook',
+      webhook: 'https://shiftboard-plaid-1.onrender.com/api/webhook',
     });
     res.json({ success: true, message: 'Webhook registered' });
   } catch (err) {
