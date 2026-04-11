@@ -7,7 +7,7 @@ app.use(express.json());
 app.use(cors());
 
 const config = new Configuration({
-  basePath: PlaidEnvironments[process.env.PLAID_ENV || 'development'],
+  basePath: PlaidEnvironments[process.env.PLAID_ENV || 'production'],
   baseOptions: {
     headers: {
       'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID || '69caec649a4613000d81fe4c',
@@ -18,8 +18,8 @@ const config = new Configuration({
 
 const plaidClient = new PlaidApi(config);
 
-// Firebase REST API helper — no SDK needed
-const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://cashflow-shiftboard-default-rtdb.firebaseio.com';
+// Firebase REST API helper (matches frontend DB: shiftly-300fa)
+const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://shiftly-300fa-default-rtdb.firebaseio.com';
 
 async function writeToFirebase(path, data) {
   try {
@@ -47,15 +47,52 @@ async function readFromFirebase(path) {
   }
 }
 
-let accessToken = null;
+// Load access token from env var, Firebase, or frontend query param
+let accessToken = process.env.PLAID_ACCESS_TOKEN || null;
 
-// Load saved access token from Firebase on startup
+// Load saved access token from Firebase on startup (if not set via env var)
 (async function loadToken() {
-  const t = await readFromFirebase('shiftboard/plaid_token');
-  if (t) { accessToken = t; console.log('Restored Plaid access token from Firebase'); }
+  if (!accessToken) {
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) { accessToken = t; console.log('Restored Plaid access token from Firebase'); }
+  } else {
+    console.log('Using Plaid access token from env var');
+  }
 })();
 
-// Step 1: Create a link token (frontend uses this to open Plaid Link)
+// Fetch transactions and cache to Firebase for auto-sync
+async function syncAndCache(token, startDate, endDate) {
+  const response = await plaidClient.transactionsGet({
+    access_token: token,
+    start_date: startDate,
+    end_date: endDate,
+    options: { count: 500, offset: 0 },
+  });
+
+  const transactions = response.data.transactions
+    .filter(tx => tx.amount > 0)
+    .map(tx => ({
+      date: tx.date,
+      name: tx.name || tx.merchant_name || 'Unknown',
+      merchant_name: tx.merchant_name || '',
+      amount: Math.round(tx.amount * 100) / 100,
+      category: tx.category,
+      datetime: tx.datetime || tx.authorized_datetime || '',
+    }));
+
+  // Write cached transactions to Firebase for auto-sync
+  await writeToFirebase('shiftboard/cached_transactions', {
+    transactions: transactions,
+    startDate: startDate,
+    endDate: endDate,
+    syncedAt: Date.now(),
+  });
+
+  console.log('Synced ' + transactions.length + ' transactions to Firebase (' + startDate + ' to ' + endDate + ')');
+  return { transactions, allTx: response.data.transactions };
+}
+
+// Step 1: Create a link token
 app.post('/api/create-link-token', async (req, res) => {
   try {
     const response = await plaidClient.linkTokenCreate({
@@ -64,6 +101,7 @@ app.post('/api/create-link-token', async (req, res) => {
       products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: 'en',
+      webhook: 'https://shiftboard-plaid-1.onrender.com/api/webhook',
     });
     res.json({ link_token: response.data.link_token });
   } catch (err) {
@@ -80,34 +118,34 @@ app.post('/api/exchange-token', async (req, res) => {
     accessToken = response.data.access_token;
     // Persist to Firebase so it survives restarts
     await writeToFirebase('shiftboard/plaid_token', accessToken);
-    res.json({ success: true });
+    res.json({ success: true, access_token: accessToken });
   } catch (err) {
     console.error(err.response ? err.response.data : err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Step 3: Get transactions for the current week (dynamic dates from query params)
+// Step 3: Get transactions (accepts token from query param or memory)
 app.get('/api/transactions', async (req, res) => {
-  // Try loading token from Firebase if not in memory
-  if (!accessToken) {
+  // Accept token from frontend query param, env var, or Firebase
+  const token = req.query.token || accessToken;
+  if (!token) {
+    // Try Firebase as last resort
     const t = await readFromFirebase('shiftboard/plaid_token');
-    if (t) accessToken = t;
+    if (t) { accessToken = t; }
+    if (!accessToken) {
+      return res.status(400).json({ error: 'No access token. Please link your bank first.' });
+    }
   }
-  if (!accessToken) {
-    return res.status(400).json({ error: 'No access token. Please link your bank first.' });
-  }
+  if (token) accessToken = token;
+
   try {
     const startDate = req.query.start || new Date().toISOString().slice(0,10);
     const endDate = req.query.end || new Date().toISOString().slice(0,10);
-    const response = await plaidClient.transactionsGet({
-      access_token: accessToken,
-      start_date: startDate,
-      end_date: endDate,
-      options: { count: 500, offset: 0 },
-    });
 
-    // Build dynamic dayMap from start/end range
+    const { transactions, allTx } = await syncAndCache(accessToken, startDate, endDate);
+
+    // Build dynamic spending map
     const spending = {};
     const d = new Date(startDate + 'T12:00:00');
     const end = new Date(endDate + 'T12:00:00');
@@ -116,40 +154,44 @@ app.get('/api/transactions', async (req, res) => {
       d.setDate(d.getDate() + 1);
     }
 
-    // Group spending by day (only positive amounts = spending, exclude income deposits)
-    response.data.transactions.forEach(function(tx) {
+    allTx.forEach(function(tx) {
       if (tx.amount > 0 && spending[tx.date] !== undefined) {
         spending[tx.date] += tx.amount;
       }
     });
 
-    // Round each day
     Object.keys(spending).forEach(d => {
       spending[d] = Math.round(spending[d] * 100) / 100;
     });
 
-    res.json({
-      spending,
-      transactions: response.data.transactions
-        .filter(tx => tx.amount > 0)
-        .map(tx => ({
-          date: tx.date,
-          name: tx.name || tx.merchant_name || 'Unknown',
-          merchant_name: tx.merchant_name,
-          amount: Math.round(tx.amount * 100) / 100,
-          category: tx.category,
-          datetime: tx.datetime || tx.authorized_datetime || '',
-        }))
-    });
+    res.json({ spending, transactions });
   } catch (err) {
     console.error(err.response ? err.response.data : err.message);
-    // If token is invalid, clear it
     if (err.response && err.response.data && err.response.data.error_code === 'INVALID_ACCESS_TOKEN') {
       accessToken = null;
       await writeToFirebase('shiftboard/plaid_token', null);
     }
     res.status(500).json({ error: err.message });
   }
+});
+
+// Webhook handler for auto-sync
+app.post('/api/webhook', async (req, res) => {
+  console.log('Webhook received:', req.body.webhook_type, req.body.webhook_code);
+  if (req.body.webhook_type === 'TRANSACTIONS') {
+    try {
+      if (accessToken) {
+        const now = new Date();
+        const dayOfWeek = now.getDay();
+        const sunday = new Date(now);
+        sunday.setDate(now.getDate() - dayOfWeek);
+        const saturday = new Date(sunday);
+        saturday.setDate(sunday.getDate() + 6);
+        await syncAndCache(accessToken, sunday.toISOString().slice(0,10), saturday.toISOString().slice(0,10));
+      }
+    } catch(e) { console.error('Webhook sync failed:', e.message); }
+  }
+  res.json({ received: true });
 });
 
 // Health check
