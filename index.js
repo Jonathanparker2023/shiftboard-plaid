@@ -18,27 +18,41 @@ const config = new Configuration({
 
 const plaidClient = new PlaidApi(config);
 
-// Persist access token to Firebase so it survives Render restarts
-const admin = require('firebase-admin');
-let firebaseApp;
-try {
-  firebaseApp = admin.initializeApp({
-    databaseURL: process.env.FIREBASE_DB_URL || 'https://cashflow-shiftboard-default-rtdb.firebaseio.com'
-  });
-} catch(e) {
-  firebaseApp = admin.app();
+// Firebase REST API helper — no SDK needed
+const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://cashflow-shiftboard-default-rtdb.firebaseio.com';
+
+async function writeToFirebase(path, data) {
+  try {
+    const url = `${FIREBASE_DB_URL}/${path}.json`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) console.error('Firebase write failed:', res.status);
+  } catch(e) {
+    console.error('Firebase write error:', e.message);
+  }
 }
-const fbDb = admin.database();
+
+async function readFromFirebase(path) {
+  try {
+    const url = `${FIREBASE_DB_URL}/${path}.json`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) {
+    console.error('Firebase read error:', e.message);
+    return null;
+  }
+}
 
 let accessToken = null;
 
 // Load saved access token from Firebase on startup
 (async function loadToken() {
-  try {
-    const snap = await fbDb.ref('shiftboard/plaid_token').once('value');
-    const t = snap.val();
-    if (t) { accessToken = t; console.log('Restored Plaid access token from Firebase'); }
-  } catch(e) { console.error('Could not load saved token:', e.message); }
+  const t = await readFromFirebase('shiftboard/plaid_token');
+  if (t) { accessToken = t; console.log('Restored Plaid access token from Firebase'); }
 })();
 
 // Step 1: Create a link token (frontend uses this to open Plaid Link)
@@ -65,7 +79,7 @@ app.post('/api/exchange-token', async (req, res) => {
     const response = await plaidClient.itemPublicTokenExchange({ public_token });
     accessToken = response.data.access_token;
     // Persist to Firebase so it survives restarts
-    try { await fbDb.ref('shiftboard/plaid_token').set(accessToken); } catch(e) {}
+    await writeToFirebase('shiftboard/plaid_token', accessToken);
     res.json({ success: true });
   } catch (err) {
     console.error(err.response ? err.response.data : err.message);
@@ -77,10 +91,8 @@ app.post('/api/exchange-token', async (req, res) => {
 app.get('/api/transactions', async (req, res) => {
   // Try loading token from Firebase if not in memory
   if (!accessToken) {
-    try {
-      const snap = await fbDb.ref('shiftboard/plaid_token').once('value');
-      accessToken = snap.val();
-    } catch(e) {}
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) accessToken = t;
   }
   if (!accessToken) {
     return res.status(400).json({ error: 'No access token. Please link your bank first.' });
@@ -95,7 +107,7 @@ app.get('/api/transactions', async (req, res) => {
       options: { count: 500, offset: 0 },
     });
 
-    // Build dynamic dayMap from start/end range (no more hardcoded dates)
+    // Build dynamic dayMap from start/end range
     const spending = {};
     const d = new Date(startDate + 'T12:00:00');
     const end = new Date(endDate + 'T12:00:00');
@@ -134,25 +146,9 @@ app.get('/api/transactions', async (req, res) => {
     // If token is invalid, clear it
     if (err.response && err.response.data && err.response.data.error_code === 'INVALID_ACCESS_TOKEN') {
       accessToken = null;
-      try { await fbDb.ref('shiftboard/plaid_token').remove(); } catch(e) {}
+      await writeToFirebase('shiftboard/plaid_token', null);
     }
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Accept token from frontend (restore saved token)
-app.post('/api/save-token', async (req, res) => {
-  try {
-    const { token } = req.body;
-    if (token) {
-      accessToken = token;
-      await fbDb.ref('shiftboard/plaid_token').set(token);
-      res.json({ success: true });
-    } else {
-      res.status(400).json({ error: 'No token provided' });
-    }
-  } catch(e) {
-    res.status(500).json({ error: e.message });
   }
 });
 
