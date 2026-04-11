@@ -1,0 +1,14 @@
+{
+  "name": "shiftboard-plaid-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "plaid": "^14.0.0",
+    "cors": "^2.8.5",
+    "firebase-admin": "^12.0.0"
+  }
+}

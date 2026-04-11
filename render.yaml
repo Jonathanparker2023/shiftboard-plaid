@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: shiftboard-plaid
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PLAID_CLIENT_ID
+        value: 69caec649a4613000d81fe4c
+      - key: PLAID_SECRET
+        value: 2124a58d6d1a455cdf9a1c79c8abc0
+      - key: PLAID_ENV
+        value: development
+      - key: FIREBASE_DB_URL
+        value: https://cashflow-shiftboard-default-rtdb.firebaseio.com
+      - key: PORT
+        value: 3000
