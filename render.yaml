@@ -12,6 +12,8 @@ services:
       - key: PLAID_ENV
         value: development
       - key: FIREBASE_DB_URL
-        value: https://cashflow-shiftboard-default-rtdb.firebaseio.com
+        value: https://shiftly-300fa-default-rtdb.firebaseio.com
       - key: PORT
         value: 3000
+      - key: SYNC_KEY
+        sync: false

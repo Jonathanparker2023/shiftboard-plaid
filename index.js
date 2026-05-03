@@ -194,6 +194,40 @@ app.post('/api/webhook', async (req, res) => {
   res.json({ received: true });
 });
 
+const SYNC_KEY = process.env.SYNC_KEY || '';
+
+// Cron-driven sync — call every 2 min from cron-job.org with ?key=...
+// Replaces the doorbell: each hit both warms Render and pulls new Plaid tx.
+app.get('/api/sync', async (req, res) => {
+  if (!SYNC_KEY || req.query.key !== SYNC_KEY) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  if (!accessToken) {
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) accessToken = t;
+  }
+  if (!accessToken) return res.json({ ok: true, synced: 0, note: 'no token' });
+
+  try {
+    const now = new Date();
+    const sunday = new Date(now); sunday.setDate(now.getDate() - now.getDay());
+    const saturday = new Date(sunday); saturday.setDate(sunday.getDate() + 6);
+    const { transactions } = await syncAndCache(
+      accessToken,
+      sunday.toISOString().slice(0,10),
+      saturday.toISOString().slice(0,10)
+    );
+    res.json({ ok: true, synced: transactions.length });
+  } catch (err) {
+    if (err.response && err.response.data && err.response.data.error_code === 'INVALID_ACCESS_TOKEN') {
+      accessToken = null;
+      await writeToFirebase('shiftboard/plaid_token', null);
+    }
+    console.error('Cron sync error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Health check
 app.get('/', (req, res) => res.json({ status: 'Shiftboard Plaid backend running', hasToken: !!accessToken }));
 
