@@ -175,6 +175,26 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
+// Debug: Check token status
+app.get('/api/token-status', async (req, res) => {
+  if (!accessToken) {
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) accessToken = t;
+  }
+
+  if (!accessToken) {
+    return res.json({ status: 'no_token', cached: false });
+  }
+
+  try {
+    const response = await plaidClient.accountsGet({ access_token: accessToken });
+    res.json({ status: 'valid', accounts: response.data.accounts.length, cached: false });
+  } catch (err) {
+    const errorCode = err.response?.data?.error_code;
+    res.json({ status: 'invalid', error: errorCode, message: err.message, cached: false });
+  }
+});
+
 // Debug: Check what Plaid has for the current week
 app.get('/api/plaid-check', async (req, res) => {
   if (!accessToken) {
