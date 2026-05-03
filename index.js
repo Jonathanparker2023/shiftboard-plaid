@@ -182,11 +182,9 @@ app.post('/api/webhook', async (req, res) => {
     try {
       if (accessToken) {
         const now = new Date();
-        const dayOfWeek = now.getDay();
-        const sunday = new Date(now);
-        sunday.setDate(now.getDate() - dayOfWeek);
-        const saturday = new Date(sunday);
-        saturday.setDate(sunday.getDate() + 6);
+        const day = now.getDay();
+        const sunday = new Date(now.getTime() - day * 86400000);
+        const saturday = new Date(sunday.getTime() + 6 * 86400000);
         await syncAndCache(accessToken, sunday.toISOString().slice(0,10), saturday.toISOString().slice(0,10));
       }
     } catch(e) { console.error('Webhook sync failed:', e.message); }
@@ -210,8 +208,9 @@ app.get('/api/sync', async (req, res) => {
 
   try {
     const now = new Date();
-    const sunday = new Date(now); sunday.setDate(now.getDate() - now.getDay());
-    const saturday = new Date(sunday); saturday.setDate(sunday.getDate() + 6);
+    const day = now.getDay();
+    const sunday = new Date(now.getTime() - day * 86400000);
+    const saturday = new Date(sunday.getTime() + 6 * 86400000);
     const { transactions } = await syncAndCache(
       accessToken,
       sunday.toISOString().slice(0,10),
