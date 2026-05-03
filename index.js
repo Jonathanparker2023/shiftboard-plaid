@@ -262,8 +262,11 @@ app.post('/api/webhook', async (req, res) => {
 
 const SYNC_KEY = process.env.SYNC_KEY || '';
 
-// Cron-driven sync — call every 2 min from cron-job.org with ?key=...
-// Replaces the doorbell: each hit both warms Render and pulls new Plaid tx.
+let lastRefreshAt = 0;
+const REFRESH_MIN_INTERVAL_MS = 6 * 60 * 1000;
+
+// Cron-driven sync — call every 1 min from cron-job.org with ?key=...
+// Forces Plaid to pull fresh data from Chime every 6 min (rate-limit safe).
 app.get('/api/sync', async (req, res) => {
   if (!SYNC_KEY || req.query.key !== SYNC_KEY) {
     return res.status(403).json({ error: 'forbidden' });
@@ -273,6 +276,16 @@ app.get('/api/sync', async (req, res) => {
     if (t) accessToken = t;
   }
   if (!accessToken) return res.json({ ok: true, synced: 0, note: 'no token' });
+
+  if (Date.now() - lastRefreshAt > REFRESH_MIN_INTERVAL_MS) {
+    try {
+      await plaidClient.transactionsRefresh({ access_token: accessToken });
+      lastRefreshAt = Date.now();
+      console.log('Triggered Plaid refresh');
+    } catch (e) {
+      console.error('Refresh failed:', e.response?.data?.error_code || e.message);
+    }
+  }
 
   try {
     // Accept optional date param (YYYY-MM-DD) from client, or calculate from Eastern timezone
@@ -306,6 +319,27 @@ app.get('/api/sync', async (req, res) => {
     }
     console.error('Cron sync error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Force refresh — bypasses the 6-min throttle. Used by manual "Sync Chime" click.
+app.get('/api/force-refresh', async (req, res) => {
+  if (!accessToken) {
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) accessToken = t;
+  }
+  if (!accessToken) return res.status(400).json({ error: 'No access token' });
+
+  try {
+    await plaidClient.transactionsRefresh({ access_token: accessToken });
+    lastRefreshAt = Date.now();
+    console.log('Force refresh triggered');
+    await new Promise(r => setTimeout(r, 3000));
+    res.json({ ok: true, refreshed: true });
+  } catch (e) {
+    const errCode = e.response?.data?.error_code || e.message;
+    console.error('Force refresh failed:', errCode);
+    res.status(500).json({ ok: false, error: errCode });
   }
 });
 
