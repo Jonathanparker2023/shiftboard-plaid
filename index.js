@@ -175,6 +175,50 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
+// Debug: Check what Plaid has for the current week
+app.get('/api/plaid-check', async (req, res) => {
+  if (!accessToken) {
+    const t = await readFromFirebase('shiftboard/plaid_token');
+    if (t) accessToken = t;
+  }
+  if (!accessToken) return res.status(400).json({ error: 'No access token' });
+
+  try {
+    const now = new Date();
+    const easternTime = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+    const today = new Date(easternTime.getUTCFullYear(), easternTime.getUTCMonth(), easternTime.getUTCDate());
+    const day = today.getDay();
+    const sunday = new Date(today);
+    sunday.setDate(today.getDate() - day);
+    const saturday = new Date(sunday);
+    saturday.setDate(sunday.getDate() + 6);
+
+    const startStr = sunday.getFullYear() + '-' + String(sunday.getMonth() + 1).padStart(2, '0') + '-' + String(sunday.getDate()).padStart(2, '0');
+    const endStr = saturday.getFullYear() + '-' + String(saturday.getMonth() + 1).padStart(2, '0') + '-' + String(saturday.getDate()).padStart(2, '0');
+
+    const response = await plaidClient.transactionsGet({
+      access_token: accessToken,
+      start_date: startStr,
+      end_date: endStr,
+      options: { count: 500, offset: 0 },
+    });
+
+    res.json({
+      date_range: { start: startStr, end: endStr },
+      total: response.data.transactions.length,
+      transactions: response.data.transactions.slice(0, 50).map(tx => ({
+        date: tx.date,
+        name: tx.name || tx.merchant_name,
+        amount: tx.amount,
+        pending: tx.pending,
+      })),
+    });
+  } catch (err) {
+    console.error(err.response ? err.response.data : err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Webhook handler for auto-sync
 app.post('/api/webhook', async (req, res) => {
   console.log('Webhook received:', req.body.webhook_type, req.body.webhook_code);
