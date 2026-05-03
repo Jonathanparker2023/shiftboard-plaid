@@ -181,11 +181,15 @@ app.post('/api/webhook', async (req, res) => {
   if (req.body.webhook_type === 'TRANSACTIONS') {
     try {
       if (accessToken) {
-        const now = new Date();
-        const day = now.getDay();
-        const sunday = new Date(now.getTime() - day * 86400000);
-        const saturday = new Date(sunday.getTime() + 6 * 86400000);
-        await syncAndCache(accessToken, sunday.toISOString().slice(0,10), saturday.toISOString().slice(0,10));
+        const today = new Date();
+        const day = today.getDay();
+        const sunday = new Date(today);
+        sunday.setDate(today.getDate() - day);
+        const saturday = new Date(sunday);
+        saturday.setDate(sunday.getDate() + 6);
+        const startStr = sunday.getFullYear() + '-' + String(sunday.getMonth() + 1).padStart(2, '0') + '-' + String(sunday.getDate()).padStart(2, '0');
+        const endStr = saturday.getFullYear() + '-' + String(saturday.getMonth() + 1).padStart(2, '0') + '-' + String(saturday.getDate()).padStart(2, '0');
+        await syncAndCache(accessToken, startStr, endStr);
       }
     } catch(e) { console.error('Webhook sync failed:', e.message); }
   }
@@ -207,15 +211,26 @@ app.get('/api/sync', async (req, res) => {
   if (!accessToken) return res.json({ ok: true, synced: 0, note: 'no token' });
 
   try {
-    const now = new Date();
-    const day = now.getDay();
-    const sunday = new Date(now.getTime() - day * 86400000);
-    const saturday = new Date(sunday.getTime() + 6 * 86400000);
-    const { transactions } = await syncAndCache(
-      accessToken,
-      sunday.toISOString().slice(0,10),
-      saturday.toISOString().slice(0,10)
-    );
+    // Accept optional date param (YYYY-MM-DD) from client to handle timezone offset
+    const dateParam = req.query.date;
+    let today;
+    if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+      const [y, m, d] = dateParam.split('-').map(Number);
+      today = new Date(y, m - 1, d);
+    } else {
+      today = new Date();
+    }
+
+    const day = today.getDay();
+    const sunday = new Date(today);
+    sunday.setDate(today.getDate() - day);
+    const saturday = new Date(sunday);
+    saturday.setDate(sunday.getDate() + 6);
+
+    const startStr = sunday.getFullYear() + '-' + String(sunday.getMonth() + 1).padStart(2, '0') + '-' + String(sunday.getDate()).padStart(2, '0');
+    const endStr = saturday.getFullYear() + '-' + String(saturday.getMonth() + 1).padStart(2, '0') + '-' + String(saturday.getDate()).padStart(2, '0');
+
+    const { transactions } = await syncAndCache(accessToken, startStr, endStr);
     res.json({ ok: true, synced: transactions.length });
   } catch (err) {
     if (err.response && err.response.data && err.response.data.error_code === 'INVALID_ACCESS_TOKEN') {
