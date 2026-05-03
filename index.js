@@ -279,11 +279,13 @@ app.get('/api/sync', async (req, res) => {
 
   if (Date.now() - lastRefreshAt > REFRESH_MIN_INTERVAL_MS) {
     try {
-      await plaidClient.transactionsRefresh({ access_token: accessToken });
+      // accountsBalanceGet forces Plaid to talk to Chime in real-time;
+      // side effect: often triggers fresh transaction pull
+      await plaidClient.accountsBalanceGet({ access_token: accessToken });
       lastRefreshAt = Date.now();
-      console.log('Triggered Plaid refresh');
+      console.log('Triggered balance refresh (side-effect: transactions pull)');
     } catch (e) {
-      console.error('Refresh failed:', e.response?.data?.error_code || e.message);
+      console.error('Balance refresh failed:', e.response?.data?.error_code || e.message);
     }
   }
 
@@ -331,9 +333,9 @@ app.get('/api/force-refresh', async (req, res) => {
   if (!accessToken) return res.status(400).json({ error: 'No access token' });
 
   try {
-    await plaidClient.transactionsRefresh({ access_token: accessToken });
+    await plaidClient.accountsBalanceGet({ access_token: accessToken });
     lastRefreshAt = Date.now();
-    console.log('Force refresh triggered');
+    console.log('Force balance refresh triggered');
     await new Promise(r => setTimeout(r, 3000));
     res.json({ ok: true, refreshed: true });
   } catch (e) {
