@@ -211,14 +211,17 @@ app.get('/api/sync', async (req, res) => {
   if (!accessToken) return res.json({ ok: true, synced: 0, note: 'no token' });
 
   try {
-    // Accept optional date param (YYYY-MM-DD) from client to handle timezone offset
+    // Accept optional date param (YYYY-MM-DD) from client, or calculate from Eastern timezone
     const dateParam = req.query.date;
     let today;
     if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
       const [y, m, d] = dateParam.split('-').map(Number);
       today = new Date(y, m - 1, d);
     } else {
-      today = new Date();
+      // Default to Eastern timezone (UTC-4/5 depending on DST)
+      const now = new Date();
+      const easternTime = new Date(now.getTime() - 5 * 60 * 60 * 1000); // UTC-5 base
+      today = new Date(easternTime.getUTCFullYear(), easternTime.getUTCMonth(), easternTime.getUTCDate());
     }
 
     const day = today.getDay();
