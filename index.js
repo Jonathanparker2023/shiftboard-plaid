@@ -265,84 +265,23 @@ const SYNC_KEY = process.env.SYNC_KEY || '';
 let lastRefreshAt = 0;
 const REFRESH_MIN_INTERVAL_MS = 6 * 60 * 1000;
 
-// Cron-driven sync — call every 1 min from cron-job.org with ?key=...
-// Forces Plaid to pull fresh data from Chime every 6 min (rate-limit safe).
-app.get('/api/sync', async (req, res) => {
-  if (!SYNC_KEY || req.query.key !== SYNC_KEY) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  if (!accessToken) {
-    const t = await readFromFirebase('shiftboard/plaid_token');
-    if (t) accessToken = t;
-  }
-  if (!accessToken) return res.json({ ok: true, synced: 0, note: 'no token' });
+// DEPRECATED (2026-05-16): legacy backend retired. All Plaid sync is now
+// handled by the Next.js app at shiftlycash.vercel.app. The accountsBalanceGet
+// calls below were hitting Plaid ~200x/day costing ~$240/month with no value.
+// Endpoints below return 410 Gone so cron-job.org stops being useful.
 
-  if (Date.now() - lastRefreshAt > REFRESH_MIN_INTERVAL_MS) {
-    try {
-      // accountsBalanceGet forces Plaid to talk to Chime in real-time;
-      // side effect: often triggers fresh transaction pull
-      await plaidClient.accountsBalanceGet({ access_token: accessToken });
-      lastRefreshAt = Date.now();
-      console.log('Triggered balance refresh (side-effect: transactions pull)');
-    } catch (e) {
-      console.error('Balance refresh failed:', e.response?.data?.error_code || e.message);
-    }
-  }
-
-  try {
-    // Accept optional date param (YYYY-MM-DD) from client, or calculate from Eastern timezone
-    const dateParam = req.query.date;
-    let today;
-    if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
-      const [y, m, d] = dateParam.split('-').map(Number);
-      today = new Date(y, m - 1, d);
-    } else {
-      // Default to Eastern timezone (UTC-4/5 depending on DST)
-      const now = new Date();
-      const easternTime = new Date(now.getTime() - 5 * 60 * 60 * 1000); // UTC-5 base
-      today = new Date(easternTime.getUTCFullYear(), easternTime.getUTCMonth(), easternTime.getUTCDate());
-    }
-
-    const day = today.getDay();
-    const sunday = new Date(today);
-    sunday.setDate(today.getDate() - day);
-    const saturday = new Date(sunday);
-    saturday.setDate(sunday.getDate() + 6);
-
-    const startStr = sunday.getFullYear() + '-' + String(sunday.getMonth() + 1).padStart(2, '0') + '-' + String(sunday.getDate()).padStart(2, '0');
-    const endStr = saturday.getFullYear() + '-' + String(saturday.getMonth() + 1).padStart(2, '0') + '-' + String(saturday.getDate()).padStart(2, '0');
-
-    const { transactions } = await syncAndCache(accessToken, startStr, endStr);
-    res.json({ ok: true, synced: transactions.length });
-  } catch (err) {
-    if (err.response && err.response.data && err.response.data.error_code === 'INVALID_ACCESS_TOKEN') {
-      accessToken = null;
-      await writeToFirebase('shiftboard/plaid_token', null);
-    }
-    console.error('Cron sync error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/sync', (req, res) => {
+  res.status(410).json({
+    error: 'deprecated',
+    message: 'Legacy backend retired. Use shiftlycash.vercel.app.',
+  });
 });
 
-// Force refresh — bypasses the 6-min throttle. Used by manual "Sync Chime" click.
-app.get('/api/force-refresh', async (req, res) => {
-  if (!accessToken) {
-    const t = await readFromFirebase('shiftboard/plaid_token');
-    if (t) accessToken = t;
-  }
-  if (!accessToken) return res.status(400).json({ error: 'No access token' });
-
-  try {
-    await plaidClient.accountsBalanceGet({ access_token: accessToken });
-    lastRefreshAt = Date.now();
-    console.log('Force balance refresh triggered');
-    await new Promise(r => setTimeout(r, 3000));
-    res.json({ ok: true, refreshed: true });
-  } catch (e) {
-    const errCode = e.response?.data?.error_code || e.message;
-    console.error('Force refresh failed:', errCode);
-    res.status(500).json({ ok: false, error: errCode });
-  }
+app.get('/api/force-refresh', (req, res) => {
+  res.status(410).json({
+    error: 'deprecated',
+    message: 'Legacy backend retired. Use shiftlycash.vercel.app.',
+  });
 });
 
 // Health check
